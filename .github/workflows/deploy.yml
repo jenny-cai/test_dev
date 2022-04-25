@@ -31,7 +31,7 @@ jobs:
       run: |
           cat << EOF > looker.ini
           [dev]
-          base_url=https://profservices.dev.looker.com:19999
+          base_url=https://cdldev.cloud.looker.com:19999
           client_id=${{ secrets.DEV_CLIENT_ID }}
           client_secret=${{ secrets.DEV_CLIENT_SECRET }}
           verify_ssl=True 
