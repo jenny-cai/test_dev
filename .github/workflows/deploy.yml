@@ -1,0 +1,132 @@
+name: Content Deployer
+on: 
+  workflow_dispatch:
+    inputs:
+      promotion_direction:
+        description: 'Input the Content Promotion Direction: dev_to_uat OR uat_to_prod'     
+        required: true
+      dashboard_list_for_promotion:
+        description: 'Type BULK to promote all dashboards. Otherwise input a comma delimited list of Dashboard Titles'     
+        required: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.8]
+        ruby-version: [2.6]
+
+    steps:
+
+    - name: Install Gazer
+      run: sudo gem install gazer
+    
+    - name: Install Looker Deployer
+      run: |
+        sudo python -m pip install --upgrade pip
+        sudo pip install looker-deployer
+        sudo pip install looker-sdk
+        sudo pip install GitPython
+    - name: Create Looker ini File
+      run: |
+          cat << EOF > looker.ini
+          [dev]
+          base_url=https://profservices.dev.looker.com:19999
+          client_id=${{ secrets.DEV_CLIENT_ID }}
+          client_secret=${{ secrets.DEV_CLIENT_SECRET }}
+          verify_ssl=True 
+          
+          [uat]
+          base_url=https://teach.corp.looker.com:19999
+          client_id=${{ secrets.UAT_CLIENT_ID }}
+          client_secret=${{ secrets.UAT_CLIENT_SECRET }}
+          verify_ssl=True 
+          
+          [prod]
+          base_url=tbd
+          client_id=${{ secrets.PROD_CLIENT_ID }}
+          client_secret=${{ secrets.PROD_CLIENT_SECRET }}
+          verify_ssl=True
+    
+    - name: Instance variables dev_to_uat
+      if: ${{ github.event.inputs.promotion_direction == 'dev_to_uat'}}
+      run: |
+          echo "SOURCE_INSTANCE=dev" >> $GITHUB_ENV
+          echo "RECEIVING_INSTANCE=uat" >> $GITHUB_ENV
+          echo "SOURCE_FOLDER=1" >> $GITHUB_ENV
+         
+    - name: Instance variables uat_to_prod
+      if: ${{ github.event.inputs.promotion_direction == 'uat_to_prod'}}
+      run: |
+          echo "SOURCE_INSTANCE=uat" >> $GITHUB_ENV
+          echo "RECEIVING_INSTANCE=prod" >> $GITHUB_ENV
+          echo ${{ github.event.inputs.promotion_direction }}
+          echo "SOURCE_FOLDER=1" >> $GITHUB_ENV
+          
+    - name: Check vars
+      run: |
+          echo ${{ env.SOURCE_INSTANCE }}
+          echo ${{ env.RECEIVINNG_INSTANCE }}
+          echo ${{ env.SOURCE_FOLDER }}
+              
+    - name: Create Dashboard List Checker
+      run: |
+          cat << EOF > check_dashboards_against_list.py 
+          import os
+          import re
+          from  argparse import ArgumentParser, SUPPRESS
+          import pathlib
+          import shutil
+          # Setup top level argparser
+          parser = ArgumentParser(usage=SUPPRESS)
+          parser.add_argument('--dashboard_list', type=str,
+          required=False, help='If this parameter is left unspecified, ' +
+          'all dashboards will be setup for the client. Otherwise, only the '+
+          'dashboards in the comma delimited list will be migrated when a list is provided')
+          args=parser.parse_args()
+          try:
+              dashboard_list  = args.dashboard_list
+              dashboard_list = re.split(",",dashboard_list)
+          except AttributeError:
+              pass
+          def check_dashboards_against_list(dashboard_list_input):
+              """Check if the --dashboard_list argument is being used,
+              if it is then clean up undesired exported files"""
+              if 'BULK' in dashboard_list_input:
+                  return 200 
+              for path, dirs, files in os.walk("./instance_content"):
+                  for filename in files:
+                       full_path = os.path.join(path, filename)
+                       parsed_file = re.split("_",filename,2)
+                       dashboard_name = parsed_file[2].replace(".json","")
+                       print(dashboard_name)
+                       print(full_path)
+                       is_space = False
+                       if parsed_file[0] == 'Space' or parsed_file[0] == 'Folder':
+                           is_space = True
+                       if dashboard_name not in dashboard_list_input and is_space is False:
+                           os.remove(full_path)
+          def main():
+              check_dashboards_against_list(dashboard_list)
+          if __name__ == "__main__":
+              main()      
+          EOF
+    - name: Export content from Source Instance
+      run: |
+          ldeploy content export --env "${{ env.SOURCE_INSTANCE }}" --ini looker.ini --folders ${{ env.SOURCE_FOLDER }} --local-target ./instance_content 
+        
+    - name: Clean up exported dashboards to only include user selection
+      run: |
+         ls
+         python check_dashboards_against_list.py --dashboard_list="${{ github.event.inputs.dashboard_list_for_promotion }}"
+         echo ${{ github.event.inputs.dashboard_list_for_promotion }}
+         
+    - name: Add spaces in file and directory names from instance content
+      run: |
+          find -wholename "./instance_content/*_*" -print0 | sort -rz | while read -d $'\0' f; do mv -v "$f" "$(dirname "$f")/$(basename "${f//_/ }")"; done
+ 
+         
+    - name: Import content to Receiving Instance
+      if: ${{ github.event.inputs.promotion_direction == 'dev_to_uat' || github.event.inputs.promotion_direction == 'uat_to_prod'}}
+      run: |
+          ldeploy content import --env "${{ env.RECEIVING_INSTANCE }}" --ini looker.ini --target-folder Shared --folders ./instance_content/Shared --recursive
